@@ -39,7 +39,6 @@ def selector(stdscr, options: list, prompt: str) -> int:
 def menu(stdscr, options: str) -> str:
     menus = {
         RUN_SCORPION: [
-            RUN_SCORPION,
             RUN_SC_CLI,
             RUN_SC_GUI,
             EXIT,

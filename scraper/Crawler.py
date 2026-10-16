@@ -1,13 +1,17 @@
 import logging
 import re
-from urllib.parse import urljoin, urlparse, unquote
+from urllib.robotparser import RobotFileParser
+from urllib.parse import urljoin, urlparse, unquote, urlunparse
 import hashlib
 from pathlib import Path
 from datetime import datetime
+import time
 import requests
 from bs4 import BeautifulSoup
 
-from src.constants import MAX_RESPONSE_SIZE, CHUNK_SIZE, MAX_IMAGE_SIZE, MAX_IMAGES
+
+from src.constants import MAX_RESPONSE_SIZE, CHUNK_SIZE, MAX_IMAGE_SIZE, \
+    MAX_IMAGES, USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,15 @@ class Crawler:
         self.allowed_port = parsed_url.port
         self.allowed_path = parsed_url.path.rstrip("/") or "/"
 
+        self.session = requests.Session()
+        self.session.headers = ({
+            'Userr-Agent': USER_AGENT
+        })
+
+        self.robot = self.__get_robot()
+        delay = self.robot.crawl_delay(USER_AGENT)
+        self.crawl_delay = delay if delay is not None else 1.0
+
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self.links_max = links_max
@@ -52,6 +65,59 @@ class Crawler:
         logger.info(f"Recursivity: {"True" if self.recursivity else "False"}")
         logger.info(f"Max fo links to search in: {self.links_max}")
         logger.info(f"Max recursion level: {self.max_level}")
+
+    def __get_robot(self, tries: int = 0):
+        robots = RobotFileParser()
+
+        netloc = self.allowed_hostname
+
+        if self.allowed_port is not None:
+            netloc = f"{netloc}:{self.allowed_port}"
+
+        robots_url = urlunparse((
+            self.allowed_scheme,
+            netloc,
+            "/robots.txt",
+            "",
+            "",
+            ""
+        ))
+
+        try:
+            time.sleep(1.0)
+            with self.session.get(robots_url, timeout=10) as response:
+                if response.status_code == 200:
+                    robots.parse(response.text.splitlines())
+                    logger.info("Found robots.txt, setting rules")
+                    return robots
+                # robots.txt not found, allow everything
+                if response.status_code == 404:
+                    robots.allow_all = True
+                    logger.info("robots.txt not found, allowing all links")
+                    return robots
+
+                # robots.txt is forbidden, forbid everything
+                if response.status_code in (401, 403):
+                    robots.disallow_all = True
+                    logger.warning("robots.txt is forbidden, disallowing all \
+links")
+                    return robots
+
+                # server error
+                if response.status_code >= 500:
+                    if tries <= 3:
+                        logger.debug(f"Accesing robot.txt resulted in a server\
+error, retrying {tries + 1}/3")
+                        self.__get_robot(robots_url, tries + 1)
+
+                    self.robot.allow_all = True
+                    logger.error("Error loading robots.txt, allowing all links"
+                                 )
+                    return None
+
+        except Exception as error:
+            logger.error(f"error loading robots.txt: {error}")
+            return None
 
     def __get_image_name(self, image_src: str) -> str:
         path = urlparse(image_src).path
@@ -68,8 +134,8 @@ class Crawler:
         return image_name.lower()
 
     def __download_img(self, image_name: str, image_url: str) -> None:
-
-        with requests.get(
+        time.sleep(self.crawl_delay)
+        with self.session.get(
             image_url,
             timeout=(5, 15),
             allow_redirects=False,
@@ -162,24 +228,33 @@ class Crawler:
                 continue
 
     def __is_allowed(self, url: str) -> bool:
+        if self.robot is not None:
+            if not self.robot.can_fetch(USER_AGENT, url):
+                logger.debug("Blocked by robots.txt")
+                return False
+
         parsed = urlparse(url)
         if parsed.scheme.lower() != self.allowed_scheme:
+            logger.debug(f"invalid scheme: {parsed.scheme}")
             return False
 
         if parsed.hostname is None:
+            logger.debug("No hostname")
             return False
 
         if parsed.hostname.lower() != self.allowed_hostname:
+            logger.debug(f"Invalid hostname: {parsed.hostname}")
             return False
 
         if parsed.port != self.allowed_port:
+            logger.debug(f"Invalid port: {parsed.port}")
             return False
 
         return True
 
     def __get_site(self, url: str) -> str:
-
-        with requests.get(
+        time.sleep(self.crawl_delay)
+        with self.session.get(
             url,
             timeout=(5, 15),
             allow_redirects=False,
@@ -272,6 +347,7 @@ class Crawler:
                 continue
 
             if not self.__is_allowed(link):
+                self.failed.add(link)
                 logger.debug(f"Link is not allowed: {link}")
                 continue
 
