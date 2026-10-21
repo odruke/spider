@@ -21,10 +21,12 @@ class FakeResponse:
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        del _exc_type, _exc_value, _traceback
         return False
 
     def iter_content(self, chunk_size):
+        del chunk_size
         return iter(self._chunks)
 
 
@@ -78,11 +80,11 @@ def test_crawler_respects_link_limit(tmp_path, monkeypatch):
         max_level=2,
     )
 
-    monkeypatch.setattr(
-        crawler,
-        "_Crawler__get_site",
-        lambda url: '<a href="/shop/item-1">Item</a>',
-    )
+    def fake_get_site(url):
+        del url
+        return '<a href="/shop/item-1">Item</a>'
+
+    monkeypatch.setattr(crawler, "_Crawler__get_site", fake_get_site)
 
     crawler.scrape()
 
@@ -94,11 +96,11 @@ def test_scrape_does_not_follow_links_when_non_recursive(
         ):
     crawler = make_crawler(tmp_path)
 
-    monkeypatch.setattr(
-        crawler,
-        "_Crawler__get_site",
-        lambda url: '<a href="/shop/item-1">Item</a>',
-    )
+    def fake_get_site(url):
+        del url
+        return '<a href="/shop/item-1">Item</a>'
+
+    monkeypatch.setattr(crawler, "_Crawler__get_site", fake_get_site)
 
     crawler.scrape()
 
@@ -144,7 +146,7 @@ def test_image_extractor_downloads_allowed_relative_image(
         requested_urls.append((url, kwargs))
         return FakeResponse([b"image-bytes"], content_type="image/png")
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(crawler.session, "get", fake_get)
 
     soup = BeautifulSoup(
         '<img src="/images/photo.PNG?version=1">',
@@ -178,11 +180,12 @@ def test_image_extractor_skips_missing_unsafe_and_external_images(
     crawler = make_crawler(tmp_path)
     requested_urls = []
 
-    def fake_get(url, **kwargs):
+    def fake_get(url, **_kwargs):
+        del _kwargs
         requested_urls.append(url)
         return FakeResponse([b"image-bytes"])
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(crawler.session, "get", fake_get)
 
     soup = BeautifulSoup(
         """
@@ -211,12 +214,13 @@ def test_image_extractor_continues_after_failed_image(
     requested_urls = []
 
     def fake_get(url, **kwargs):
+        del kwargs
         requested_urls.append(url)
         if url.endswith("/broken.jpg"):
             raise requests.ConnectionError("connection failed")
         return FakeResponse([b"valid-image"], content_type="image/jpeg")
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(crawler.session, "get", fake_get)
 
     soup = BeautifulSoup(
         """
@@ -254,7 +258,11 @@ def test_image_extractor_does_not_save_invalid_responses(
         ):
     crawler = make_crawler(tmp_path)
 
-    monkeypatch.setattr(requests, "get", lambda url, **kwargs: response)
+    def fake_get(url, **kwargs):
+        del url, kwargs
+        return response
+
+    monkeypatch.setattr(crawler.session, "get", fake_get)
 
     soup = BeautifulSoup(
         '<img src="/images/photo.jpg">',

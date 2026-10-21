@@ -1,17 +1,28 @@
 import logging
-import re
-from urllib.robotparser import RobotFileParser
-from urllib.parse import urljoin, urlparse, unquote, urlunparse
 import hashlib
-from pathlib import Path
+import re
 from datetime import datetime
+from pathlib import Path
 import time
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
+from urllib.robotparser import RobotFileParser
+
 import requests
 from bs4 import BeautifulSoup
 
 
-from src.constants import MAX_RESPONSE_SIZE, CHUNK_SIZE, MAX_IMAGE_SIZE, \
-    MAX_IMAGES, USER_AGENT
+from src.constants import (
+    CHUNK_SIZE,
+    DEFAULT_CRAWL_DELAY,
+    MAX_IMAGES,
+    MAX_IMAGE_SIZE,
+    MAX_ROBOT_RETRIES,
+    MAX_RESPONSE_SIZE,
+    REQUEST_TIMEOUT,
+    ROBOTS_REQUEST_TIMEOUT,
+    USER_AGENT,
+    VALID_IMAGE_EXTENSIONS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +55,11 @@ class Crawler:
         self.allowed_path = parsed_url.path.rstrip("/") or "/"
 
         self.session = requests.Session()
-        self.session.headers = ({
-            'Userr-Agent': USER_AGENT
-        })
+        self.session.headers = {"User-Agent": USER_AGENT}
 
         self.robot = self.__get_robot()
         delay = self.robot.crawl_delay(USER_AGENT)
-        self.crawl_delay = delay if delay is not None else 1.0
+        self.crawl_delay = delay if delay is not None else DEFAULT_CRAWL_DELAY
 
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
@@ -59,14 +68,14 @@ class Crawler:
         self.recursivity = recursivity
         self.visited = set()
         self.failed = set()
-        self.valid_extensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp']
+        self.valid_extensions = VALID_IMAGE_EXTENSIONS
         self.downloaded_imgs = set()
 
-        logger.info(f"Recursivity: {"True" if self.recursivity else "False"}")
-        logger.info(f"Max fo links to search in: {self.links_max}")
+        logger.info("Recursivity: %s", self.recursivity)
+        logger.info("Max of links to search in: %s", self.links_max)
         logger.info(f"Max recursion level: {self.max_level}")
 
-    def __get_robot(self, tries: int = 0):
+    def __get_robot(self, tries: int = 0) -> RobotFileParser:
         robots = RobotFileParser()
 
         netloc = self.allowed_hostname
@@ -84,8 +93,11 @@ class Crawler:
         ))
 
         try:
-            time.sleep(1.0)
-            with self.session.get(robots_url, timeout=10) as response:
+            time.sleep(DEFAULT_CRAWL_DELAY)
+            with self.session.get(
+                robots_url,
+                timeout=ROBOTS_REQUEST_TIMEOUT,
+            ) as response:
                 if response.status_code == 200:
                     robots.parse(response.text.splitlines())
                     logger.info("Found robots.txt, setting rules")
@@ -104,20 +116,26 @@ links")
                     return robots
 
                 # server error
-                if response.status_code >= 500:
-                    if tries <= 3:
-                        logger.debug(f"Accesing robot.txt resulted in a server\
-error, retrying {tries + 1}/3")
-                        self.__get_robot(robots_url, tries + 1)
+                if response.status_code >= 500 and tries < MAX_ROBOT_RETRIES:
+                    logger.debug(
+                        "Accessing robots.txt resulted in a server error; "
+                        "retrying %s/%s",
+                        tries + 1,
+                        MAX_ROBOT_RETRIES,
+                    )
+                    return self.__get_robot(tries + 1)
 
-                    self.robot.allow_all = True
-                    logger.error("Error loading robots.txt, allowing all links"
-                                 )
-                    return None
+                robots.allow_all = True
+                logger.error(
+                    "Error loading robots.txt (status %s), allowing all links",
+                    response.status_code,
+                )
+                return robots
 
-        except Exception as error:
-            logger.error(f"error loading robots.txt: {error}")
-            return None
+        except (requests.RequestException, OSError, ValueError) as error:
+            robots.allow_all = True
+            logger.error("Error loading robots.txt: %s", error)
+            return robots
 
     def __get_image_name(self, image_src: str) -> str:
         path = urlparse(image_src).path
@@ -137,7 +155,7 @@ error, retrying {tries + 1}/3")
         time.sleep(self.crawl_delay)
         with self.session.get(
             image_url,
-            timeout=(5, 15),
+            timeout=REQUEST_TIMEOUT,
             allow_redirects=False,
             stream=True
                 ) as response:
@@ -188,7 +206,7 @@ error, retrying {tries + 1}/3")
                 temporary_filename.unlink(missing_ok=True)
                 raise
 
-    def __image_extractor(self, url: str, soup: BeautifulSoup):
+    def __image_extractor(self, url: str, soup: BeautifulSoup) -> None:
         images = soup.find_all('img')
 
         if len(images) < 1:
@@ -256,7 +274,7 @@ error, retrying {tries + 1}/3")
         time.sleep(self.crawl_delay)
         with self.session.get(
             url,
-            timeout=(5, 15),
+            timeout=REQUEST_TIMEOUT,
             allow_redirects=False,
             stream=True
                 ) as response:
@@ -290,7 +308,7 @@ error, retrying {tries + 1}/3")
 
         return content.decode(response.encoding or 'UTF-8', errors="replace")
 
-    def __crawl(self, url: str, max_level: int):
+    def __crawl(self, url: str | None, max_level: int) -> None:
         if max_level <= 0:
             logger.debug("Recursion reached bottom level")
             return
@@ -299,7 +317,7 @@ error, retrying {tries + 1}/3")
             logger.debug(f"Limit of links reached: {self.links_max}")
             return
 
-        if len(self.downloaded_imgs) > MAX_IMAGES:
+        if len(self.downloaded_imgs) >= MAX_IMAGES:
             logger.info(f"Limit of downloaded images reached: {MAX_IMAGES}")
             return
 
@@ -366,4 +384,3 @@ error, retrying {tries + 1}/3")
         """
         self.__crawl(url=self.url, max_level=self.max_level)
         return list(self.downloaded_imgs)
-

@@ -48,6 +48,6 @@ def validate_scorpion() -> bool:
 
     if not SCORPION_INTERPRETER.is_file():
         logger.error("Scorpion Python interpreter not found")
-        return
+        return False
 
     return True
